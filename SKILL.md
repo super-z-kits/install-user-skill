@@ -69,6 +69,147 @@ Skills are flat dirs under `/home/user_skills/`. No nesting, no versioning in th
 - Testing your own fork before opening an upstream PR.
 - Hotfixing a bug locally before it ships upstream.
 
+**Rollback** (a recent update broke something; restore the previous version):
+- See "Update flow → Rollback" below.
+
+## Update flow
+
+Updating is the same Steps 0–7 procedure as installing — the **backup step (Step 1) is what makes updates safe**. The procedure never modifies an existing install in place; it always wipes + replaces atomically after backing up. So an update is just "run the install procedure against an existing install."
+
+That said, the update flow has enough decision points (when to update, what to do about local modifications, how to roll back, how to pin to a specific version) that it deserves its own section.
+
+### When to update
+
+Update when **any** of these are true:
+
+1. **Drift detected** — the installed `.installed-from` references a commit older than upstream HEAD (see "Detecting drift" below for the one-liner check).
+2. **User explicitly asks** — "refresh", "update", "pull latest", "upgrade".
+3. **Bug fix landed upstream** — you're hitting a bug that was just fixed; pull the fix.
+4. **Pre-flight before risky work** — update to the latest stable before starting a complex task, so you're not working against a stale procedure.
+
+**Don't update** when:
+- You're mid-task and the current install is working. "If it ain't broke" applies.
+- The user is about to rotate their kit versions deliberately — let them drive.
+- You can't afford a verification cycle right now (every update should be followed by `selftest.sh` or the canonical Step 6 verify).
+
+### How update differs from install
+
+| Step | Install (skill absent) | Update (skill present) |
+|---|---|---|
+| Step 1 backup | no-op (nothing to back up) | **mandatory** — backs up the existing install to `${TARGET}.pre-update-backup-<timestamp>` |
+| Step 4 atomic replace | `rm -rf $TARGET` is a no-op | `rm -rf $TARGET` destroys the current install — the backup from Step 1 is your only rollback path |
+| Step 6 verify | assert install succeeded | assert install succeeded AND nothing regressed (e.g. scripts still executable, SKILL.md still readable) |
+| Step 7 provenance | writes first `.installed-from` | **overwrites** the previous `.installed-from` — the old provenance is lost from the live target (but preserved in the Step 1 backup) |
+
+So the only procedural difference is: **always run Step 1 (backup) on update, even if you think the install is fine.** The procedure already enforces this — don't skip it.
+
+### Local modifications: detect before overwrite
+
+If you (or the user) have edited files in the existing install (e.g. added a custom note to `SKILL.md`, patched a helper script), an update will **silently destroy those edits**. The Step 1 backup preserves them, but you won't know to restore them unless you detect them first.
+
+**Pre-update check** (run before Step 0):
+
+```bash
+USER_SKILLS_DIR="${USER_SKILLS_DIR:-/home/user_skills}"
+SKILL_NAME="<skill-name>"
+TARGET="$USER_SKILLS_DIR/$SKILL_NAME"
+
+if [ -d "$TARGET" ] && [ -f "$TARGET/.installed-from" ]; then
+  # Re-clone the upstream version the install claims to be from, then diff
+  REPO=$(awk -F': ' '/^repo:/ {print $2}' "$TARGET/.installed-from")
+  BRANCH=$(awk -F': ' '/^branch:/ {print $2}' "$TARGET/.installed-from")
+  echo "  installed from: $REPO@$BRANCH"
+  SCRATCH="/tmp/my-project/drift-check-$$"
+  git clone -q --depth 1 -b "$BRANCH" "https://github.com/${REPO}.git" "$SCRATCH/upstream" 2>/dev/null
+  # Diff the live install vs the upstream version it claims to be from
+  DIFF=$(diff -qr "$SCRATCH/upstream" "$TARGET" 2>/dev/null | grep -v -E '\.installed-from|\.pre-update-backup|\.git/' | head -20)
+  if [ -n "$DIFF" ]; then
+    echo "  [WARN] local modifications detected (differs from upstream $REPO@$BRANCH):"
+    printf '%s\n' "$DIFF" | sed 's/^/    /'
+    echo "  these will be LOST on update unless you restore them from the backup afterward."
+    echo "  to preserve: cp the modified files aside before updating, then re-apply after."
+  else
+    echo "  no local modifications — safe to update."
+  fi
+  rm -rf "$SCRATCH"
+fi
+```
+
+This check is conservative — it flags any difference, including mode-only changes. But it's better than silently losing edits.
+
+### Rollback
+
+If an update breaks something (a script no longer works, SKILL.md has a regression, etc.), restore from the most recent backup:
+
+```bash
+USER_SKILLS_DIR="${USER_SKILLS_DIR:-/home/user_skills}"
+SKILL_NAME="<skill-name>"
+TARGET="$USER_SKILLS_DIR/$SKILL_NAME"
+
+# 1. List available backups (newest first)
+ls -dt "${TARGET}.pre-update-backup-"* 2>/dev/null
+
+# 2. Pick the one you want (usually the newest)
+BACKUP=$(ls -dt "${TARGET}.pre-update-backup-"* 2>/dev/null | head -1)
+
+# 3. Roll back: backup the current (broken) state, then restore the chosen backup
+[ -n "$BACKUP" ] || { echo "no backups found"; exit 1; }
+mv "$TARGET" "${TARGET}.pre-rollback-$(date -u +%Y%m%dT%H%M%SZ)"   # preserve the broken state for diagnosis
+mv "$BACKUP" "$TARGET"   # restore the previous working version
+
+# 4. Update provenance to reflect the rollback
+cat >> "$TARGET/.installed-from" <<EOF
+rolled_back_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+rolled_back_from: <broken version commit/branch>
+rolled_back_to: <previous version commit/branch>
+EOF
+
+echo "  rolled back to: $BACKUP"
+echo "  the broken state is preserved at: ${TARGET}.pre-rollback-* (delete when no longer needed)"
+```
+
+Backups auto-prune to the last 3 (per Step 1). If you need older history, the only source is the upstream git history (the kit doesn't keep a long-term archive of past installs).
+
+### Version pinning
+
+By default, the procedure installs `main` (latest). To pin to a specific version:
+
+**Pin to a tag:**
+
+```bash
+SKILL_NAME="z-container-kit"
+SKILL_REPO="super-z-kits/z-container-kit"
+SKILL_BRANCH="v2.3.3"   # tag name instead of "main"
+# ... rest of Steps 0-7 unchanged
+```
+
+**Pin to a specific commit SHA** (most reproducible — immune to force-pushes and tag movement):
+
+```bash
+SKILL_NAME="z-container-kit"
+SKILL_REPO="super-z-kits/z-container-kit"
+SKILL_BRANCH="main"
+SKILL_COMMIT="f882677e1234abcd..."   # full SHA
+# Use a non-branch checkout instead of --branch:
+SCRATCH="/tmp/my-project/install-user-skill-$$"
+mkdir -p "$SCRATCH"
+git clone -q "https://github.com/${SKILL_REPO}.git" "$SCRATCH/$SKILL_NAME"
+git -C "$SCRATCH/$SKILL_NAME" checkout -q "$SKILL_COMMIT"
+# ... rest of Steps 3-7 unchanged
+# Provenance should record both branch and commit:
+cat > "$TARGET/.installed-from" <<EOF
+repo: $SKILL_REPO
+branch: $SKILL_BRANCH
+commit: $SKILL_COMMIT
+installed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+installed_by: super-z install-user-skill process (pinned to commit)
+EOF
+```
+
+Pinning to a SHA is the right choice for **reproducible agent setups** (e.g. a team standardizes on "everyone uses z-container-kit@f882677"). The `.installed-from` file records the exact SHA so future chats know what version is canonical.
+
+**Update checking when pinned:** the "Detecting drift" section's HEAD-comparison assumes you're tracking `main`. If you're pinned to a tag/SHA, drift = "does the tag/SHA still exist upstream?" — not "is there a newer commit?" Adjust the check accordingly.
+
 ## The canonical install/update procedure
 
 ### Step 0 — pre-flight (always)
@@ -424,19 +565,35 @@ rm -rf "$SCRATCH"
 
 8. **Don't auto-update without asking.** If the user says "install z-container-kit", install once. Don't run a cron-like check for updates. The user rotates their kit versions deliberately; auto-update would surprise them.
 
-## Detecting drift
+## Detecting drift (and listing backups)
 
-After install, you can check whether the installed version matches the upstream HEAD:
+After install, you can check whether the installed version matches the upstream HEAD. **This is the trigger for the Update flow above.**
 
 ```bash
 USER_SKILLS_DIR="${USER_SKILLS_DIR:-/home/user_skills}"
-# What we have installed:
-cat "$USER_SKILLS_DIR/z-container-kit/.installed-from"
+SKILL_NAME="z-container-kit"
+TARGET="$USER_SKILLS_DIR/$SKILL_NAME"
 
-# What's the upstream HEAD:
-curl -sS "https://api.github.com/repos/super-z-kits/z-container-kit/commits/main" | jq -r '.sha[0:8] + " " + .commit.message'
+# 1. What we have installed (from provenance):
+cat "$TARGET/.installed-from"
 
-# If they differ and you want the latest, re-run the install procedure.
+# 2. What's the upstream HEAD (matches if branch was 'main'; if pinned to a tag/SHA, this is a no-op check):
+REPO=$(awk -F': ' '/^repo:/ {print $2}' "$TARGET/.installed-from")
+BRANCH=$(awk -F': ' '/^branch:/ {print $2}' "$TARGET/.installed-from")
+curl -sS "https://api.github.com/repos/${REPO}/commits/${BRANCH}" | jq -r '.sha[0:8] + " " + .commit.message'
+
+# 3. List available backups (for rollback — see Update flow above):
+ls -dt "${TARGET}.pre-update-backup-"* 2>/dev/null
+
+# 4. If they differ and you want the latest, run the Update flow (Steps 0-7 against the existing install).
+#    If you want to roll back instead, see Update flow → Rollback.
+```
+
+**One-command check** (using the helper script — see `scripts/check-update.sh` in this repo):
+
+```bash
+bash /home/user_skills/install-user-skill/scripts/check-update.sh z-container-kit
+# prints: installed=<sha> upstream=<sha> status={up-to-date|drift-detected} backups=<count>
 ```
 
 ## What NOT to do
