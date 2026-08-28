@@ -4,7 +4,7 @@
 > Reusable across kits (z-container-kit, secrets-vault-kit, or any future skill shipped as a GitHub repo).
 > Load this whenever the user asks you to "install" / "update" / "refresh" / "copy over" a skill.
 >
-> **Canonical raw URL:** `https://raw.githubusercontent.com/super-z-kits/install-user-skill/main/install-user-skill.md`
+> **Canonical raw URL:** `https://raw.githubusercontent.com/super-z-kits/install-user-skill/main/SKILL.md`
 >
 > **Self-installing:** this skill is itself installable by its own procedure — see "Self-bootstrap" below.
 
@@ -21,18 +21,22 @@ This skill is itself installable via its own procedure. To bootstrap it (i.e. in
 ```bash
 USER_SKILLS_DIR="${USER_SKILLS_DIR:-/home/user_skills}"
 mkdir -p "$USER_SKILLS_DIR/install-user-skill"
-curl -sS -o "$USER_SKILLS_DIR/install-user-skill/install-user-skill.md" \
-  https://raw.githubusercontent.com/super-z-kits/install-user-skill/main/install-user-skill.md
-chmod 0644 "$USER_SKILLS_DIR/install-user-skill/install-user-skill.md"
+# Fetch the CANONICAL SKILL.md (not install-user-skill.md, which is a backward-compat pointer).
+# v1.1 had a bug where bootstrap fetched the pointer instead of the real file.
+curl -fsSL -o "$USER_SKILLS_DIR/install-user-skill/SKILL.md" \
+  https://raw.githubusercontent.com/super-z-kits/install-user-skill/main/SKILL.md
+chmod 0644 "$USER_SKILLS_DIR/install-user-skill/SKILL.md"
 # Provenance
 cat > "$USER_SKILLS_DIR/install-user-skill/.installed-from" <<EOF
 repo: super-z-kits/install-user-skill
 branch: main
 installed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+installed_by: super-z install-user-skill self-bootstrap
 EOF
+chmod 0600 "$USER_SKILLS_DIR/install-user-skill/.installed-from"
 ```
 
-After bootstrap, future chats reference the local copy: `cat /home/user_skills/install-user-skill/install-user-skill.md` — no GitHub fetch needed (reduces friction per audit m1).
+After bootstrap, future chats reference the local copy: `cat /home/user_skills/install-user-skill/SKILL.md` — no GitHub fetch needed (reduces friction per audit m1).
 
 ## Layout
 
@@ -70,25 +74,29 @@ Skills are flat dirs under `/home/user_skills/`. No nesting, no versioning in th
 ### Step 0 — pre-flight (always)
 
 ```bash
-# Source Doppler env if the skill repo is private (requires GH_PAT)
-[ -f /home/user_skills/zk-doppler.env ] && { set -a; source /home/user_skills/zk-doppler.env; set +a; }
-
-# Resolve the GH_PAT (if needed) — never echo it
-if [ -z "${GH_PAT:-}" ] && [ -n "${DOPPLER_PT:-}" ]; then
-  GH_PAT=$(curl -sS -H "Authorization: Bearer $DOPPLER_PT" \
-    "https://api.doppler.com/v3/configs/config/secrets?project=${DOPPLER_PROJECT:-agent-bootstrap}&config=${DOPPLER_CONFIG:-prd}" \
-    | jq -r '.secrets.GH_PAT.computed')
-fi
-
-# Define the skill source and target
+# Define the skill source and target FIRST (so we can decide if GH_PAT is needed)
 SKILL_NAME="<skill-name>"                    # e.g. z-container-kit
 SKILL_REPO="<owner>/<repo>"                   # e.g. super-z-kits/z-container-kit  OR  zikomolapoutl/z-container-kit-v2 (work repo)
 SKILL_BRANCH="${SKILL_BRANCH:-main}"          # default to main; override for testing
 USER_SKILLS_DIR="${USER_SKILLS_DIR:-/home/user_skills}"   # override for testing (e.g. /tmp/my-project/test-user-skills)
 TARGET="$USER_SKILLS_DIR/$SKILL_NAME"
+
+# GH_PAT resolution: ONLY if the repo is private (audit sub-agent-test #10 — public
+# clones don't need a PAT, so resolving it unnecessarily exposes the secret +
+# adds a network call). Determine privacy by checking if `git clone https://...`
+# would succeed anonymously — or just let the user set SKILL_REPO_PRIVATE=1.
+GH_PAT="${GH_PAT:-}"
+if [ "${SKILL_REPO_PRIVATE:-0}" = "1" ] && [ -z "$GH_PAT" ] && [ -f /home/user_skills/zk-doppler.env ]; then
+  set -a; source /home/user_skills/zk-doppler.env; set +a
+  GH_PAT=$(curl -sS -H "Authorization: Bearer $DOPPLER_PT" \
+    "https://api.doppler.com/v3/configs/config/secrets?project=${DOPPLER_PROJECT:-agent-bootstrap}&config=${DOPPLER_CONFIG:-prd}" \
+    | jq -r '.secrets.GH_PAT.computed')
+fi
 ```
 
 **`USER_SKILLS_DIR` env var (testability):** all paths in this procedure honor `$USER_SKILLS_DIR` (default `/home/user_skills`). Set it to a scratch dir to test the install procedure end-to-end without touching the live install. Hard-coding `/home/user_skills/` was an audit-F-round-5 finding (hard-coding caused the F16 "wrong repo pull" issue); the env var removes that footgun.
+
+**`SKILL_REPO_PRIVATE=1` env var (audit sub-agent-test #10):** set this only when installing from a private repo. Public clones (Strategy A below) don't need a GH_PAT; resolving one unnecessarily exposes the secret and adds a network call. Default is public (no PAT resolution).
 
 ### Step 1 — backup the existing install (if present)
 
@@ -149,9 +157,9 @@ rm -rf .git .gitignore .gitattributes 2>/dev/null
 find . -name .git -exec rm -rf {} + 2>/dev/null
 ```
 
-### Step 4 — atomic replace
+### Step 4 — atomic replace + set modes
 
-Move the new install into place atomically (so a partial install never leaves the target in a broken state):
+Move the new install into place atomically (so a partial install never leaves the target in a broken state). Then set modes explicitly — the source repo's modes are NOT preserved across clone + tar/zip, and `cp -r` inherits umask (often 077), leaving files unreadable.
 
 ```bash
 # Wipe the old target (we already backed it up in step 1)
@@ -160,10 +168,19 @@ rm -rf "$TARGET"
 # Move the new install into place
 mv "$SCRATCH/$SKILL_NAME" "$TARGET"
 
-# Set modes: scripts executable, docs readable
-[ -d "$TARGET/scripts" ] && chmod +x "$TARGET/scripts"/*.sh "$TARGET/scripts"/*.py 2>/dev/null
-find "$TARGET" -name '*.sh' -exec chmod +x {} + 2>/dev/null
-find "$TARGET" -name '*.py' -exec chmod +x {} + 2>/dev/null
+# Set modes (audit sub-agent-test #3, #4, #5, #6):
+# - All scripts executable AND world-readable (0755, not 711 from `chmod +x` on 600 base).
+#   Use `chmod 0755` not `chmod +x` — the latter produces 711 on umask 077 (broken).
+# - Include extensionless scripts (z-container-kit's `zsave`, `zsession` have no .sh/.py suffix).
+# - All docs 0644 (README, SKILL.md, reference.md, *.md).
+# - Directories 0755 (so non-owners can traverse).
+if [ -d "$TARGET/scripts" ]; then
+  find "$TARGET/scripts" -type f -exec chmod 0755 {} +
+fi
+find "$TARGET" -maxdepth 2 -type f -name '*.md' -exec chmod 0644 {} +
+chmod 0755 "$TARGET" 2>/dev/null
+[ -d "$TARGET/scripts" ] && chmod 0755 "$TARGET/scripts"
+[ -d "$TARGET/evidence" ] && chmod 0755 "$TARGET/evidence"
 
 # Set ownership (paranoia — should already be `z:z` from the move)
 chown -R z:z "$TARGET" 2>/dev/null || true
@@ -195,16 +212,33 @@ fi
 [ -f "$TARGET/SKILL.md" ] || { echo "[FAIL] $TARGET/SKILL.md missing"; exit 1; }
 echo "  SKILL.md: $(wc -l < "$TARGET/SKILL.md") lines, $(stat -c '%s' "$TARGET/SKILL.md") bytes"
 
-# Confirm scripts are executable (if present)
+# Confirm scripts are executable (audit sub-agent-test #3: extensionless scripts
+# like `zsave`/`zsession` were left non-executable by the v1.0 procedure).
+# Verify the executable bit is SET, not just that the file exists.
 if [ -d "$TARGET/scripts" ]; then
   echo "  scripts:"
   ls "$TARGET/scripts" | sed 's/^/    /'
+  # Audit sub-agent-test #3 fix: verify ALL scripts are executable, including extensionless ones
+  FAIL=0
+  for s in "$TARGET/scripts"/*; do
+    [ -f "$s" ] || continue
+    if [ ! -x "$s" ]; then
+      echo "  [FAIL] not executable: $s"
+      FAIL=1
+    fi
+  done
+  [ "$FAIL" = 0 ] && echo "  all scripts executable ✅"
 fi
 
-# Confirm no .git leaked
-find "$TARGET" -name .git -type d 2>/dev/null | head -1 \
-  && echo "  [WARN] .git dir leaked — strip it" \
-  || echo "  no .git leakage ✅"
+# Confirm no .git leaked (audit sub-agent-test #2 fix: the old `find | head -1 && echo WARN`
+# always exited 0 because head succeeded on empty input — the WARN was a false positive
+# and the "no leakage" branch was dead code. Use an explicit `if [ -n ... ]` check.)
+LEAK=$(find "$TARGET" -name .git -type d 2>/dev/null | head -1)
+if [ -n "$LEAK" ]; then
+  echo "  [WARN] .git dir leaked: $LEAK — strip it"
+else
+  echo "  no .git leakage ✅"
+fi
 
 # Clean up scratch
 rm -rf "$SCRATCH"
@@ -229,9 +263,8 @@ This file is useful for: (a) knowing which fork/branch is installed when debuggi
 ## End-to-end example: install z-container-kit
 
 ```bash
-# Pre-flight
+# Pre-flight (audit sub-agent-test #10: public clone, NO GH_PAT resolution needed)
 USER_SKILLS_DIR="${USER_SKILLS_DIR:-/home/user_skills}"
-[ -f /home/user_skills/zk-doppler.env ] && { set -a; source /home/user_skills/zk-doppler.env; set +a; }
 SKILL_NAME="z-container-kit"
 SKILL_REPO="super-z-kits/z-container-kit"     # public export
 SKILL_BRANCH="main"
@@ -240,7 +273,7 @@ TARGET="$USER_SKILLS_DIR/$SKILL_NAME"
 # Backup
 [ -d "$TARGET" ] && cp -r "$TARGET" "${TARGET}.pre-update-backup-$(date -u +%Y%m%dT%H%M%SZ)"
 
-# Fetch
+# Fetch (Strategy A: anonymous public clone — no PAT needed)
 SCRATCH="/tmp/my-project/install-user-skill-$$"
 mkdir -p "$SCRATCH"
 git clone -q --depth 1 -b "$SKILL_BRANCH" "https://github.com/${SKILL_REPO}.git" "$SCRATCH/$SKILL_NAME"
@@ -250,20 +283,26 @@ cd "$SCRATCH/$SKILL_NAME"
 rm -rf .git .gitignore
 find . -name .git -exec rm -rf {} + 2>/dev/null
 
-# Atomic replace
+# Atomic replace + set modes (Step 4 fix: chmod 0755 for ALL scripts, not just *.sh/*.py)
 rm -rf "$TARGET"
 mv "$SCRATCH/$SKILL_NAME" "$TARGET"
-[ -d "$TARGET/scripts" ] && chmod +x "$TARGET/scripts"/*.sh "$TARGET/scripts"/*.py 2>/dev/null
+[ -d "$TARGET/scripts" ] && find "$TARGET/scripts" -type f -exec chmod 0755 {} +
+find "$TARGET" -maxdepth 2 -type f -name '*.md' -exec chmod 0644 {} +
+chmod 0755 "$TARGET" 2>/dev/null
+[ -d "$TARGET/scripts" ] && chmod 0755 "$TARGET/scripts"
 
-# Verify
+# Verify (Step 6 fix: assert executable bit, not just file existence)
 [ -f "$TARGET/SKILL.md" ] && echo "✅ $TARGET/SKILL.md installed ($(wc -l < "$TARGET/SKILL.md") lines)"
+for s in "$TARGET/scripts"/*; do [ -f "$s" ] && [ ! -x "$s" ] && echo "[FAIL] not executable: $s"; done
 
-# Provenance
+# Provenance (Step 7: include installed_by + chmod 600)
 cat > "$TARGET/.installed-from" <<EOF
 repo: $SKILL_REPO
 branch: $SKILL_BRANCH
 installed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+installed_by: super-z install-user-skill process
 EOF
+chmod 600 "$TARGET/.installed-from"
 
 # Clean up
 rm -rf "$SCRATCH"
@@ -298,39 +337,58 @@ git clone -q --depth 1 -b "$SKILL_BRANCH" \
 
 ## End-to-end example: install secrets-vault-kit (single-file variant)
 
+This example uses Strategy C (single-file fetch — no git needed). It is a FAITHFUL CONDENSATION of Steps 0–7 (audit sub-agent-test #8 fix: the v1.0 example diverged from the canonical procedure, omitting Step 3 VCS-strip (irrelevant for single-file), Step 4 mode-setting, all of Step 6 verify, and Step 7's chmod 600 + installed_by: line):
+
 ```bash
+# Pre-flight (public repo — no GH_PAT needed)
 USER_SKILLS_DIR="${USER_SKILLS_DIR:-/home/user_skills}"
 SKILL_NAME="secrets-vault-kit"
 SKILL_REPO="super-z-kits/secrets-vault-kit"
 SKILL_BRANCH="main"
 TARGET="$USER_SKILLS_DIR/$SKILL_NAME"
 
-# Backup
+# Step 1: Backup
 [ -d "$TARGET" ] && cp -r "$TARGET" "${TARGET}.pre-update-backup-$(date -u +%Y%m%dT%H%M%SZ)"
 
-# Fetch (single file — no git needed)
+# Step 2 (Strategy C): single-file fetch — no git needed
 SCRATCH="/tmp/my-project/install-user-skill-$$"
 mkdir -p "$SCRATCH/$SKILL_NAME"
-curl -sS -o "$SCRATCH/$SKILL_NAME/SKILL.md" \
+curl -fsSL -o "$SCRATCH/$SKILL_NAME/SKILL.md" \
   "https://raw.githubusercontent.com/${SKILL_REPO}/${SKILL_BRANCH}/SKILL.md"
 
-# Optional: also fetch SKILL-DEPLOY.md if present
-curl -sS -o "$SCRATCH/$SKILL_NAME/SKILL-DEPLOY.md" \
-  "https://raw.githubusercontent.com/${SKILL_REPO}/${SKILL_BRANCH}/SKILL-DEPLOY.md" 2>/dev/null
+# Optional: also fetch SKILL-DEPLOY.md if present (audit sub-agent-test #9 fix: use -f to fail
+# silently on 404, NOT save a 404 HTML page as the file content)
+curl -fsSL -o "$SCRATCH/$SKILL_NAME/SKILL-DEPLOY.md" \
+  "https://raw.githubusercontent.com/${SKILL_REPO}/${SKILL_BRANCH}/SKILL-DEPLOY.md" \
+  || rm -f "$SCRATCH/$SKILL_NAME/SKILL-DEPLOY.md"
 
-# Atomic replace
+# Step 4: Atomic replace + set modes (Step 4 fix applies even for single-file installs —
+# curl preserves umask, so SKILL.md ends up 600 on umask 077 without explicit chmod)
 rm -rf "$TARGET"
 mv "$SCRATCH/$SKILL_NAME" "$TARGET"
+find "$TARGET" -maxdepth 2 -type f -name '*.md' -exec chmod 0644 {} +
+chmod 0755 "$TARGET" 2>/dev/null
 
-# Provenance
+# Step 6: Verify (audit sub-agent-test #8 fix: include the verify step!)
+[ -f "$TARGET/SKILL.md" ] || { echo "[FAIL] $TARGET/SKILL.md missing"; exit 1; }
+echo "  SKILL.md: $(wc -l < "$TARGET/SKILL.md") lines, $(stat -c '%s' "$TARGET/SKILL.md") bytes"
+LEAK=$(find "$TARGET" -name .git -type d 2>/dev/null | head -1)
+[ -n "$LEAK" ] && echo "  [WARN] .git leaked: $LEAK" || echo "  no .git leakage ✅"
+
+# Step 7: Provenance (audit sub-agent-test #8 fix: include installed_by: + chmod 600)
 cat > "$TARGET/.installed-from" <<EOF
 repo: $SKILL_REPO
 branch: $SKILL_BRANCH
 installed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+installed_by: super-z install-user-skill process (single-file variant)
 EOF
+chmod 600 "$TARGET/.installed-from"
 
+# Clean up
 rm -rf "$SCRATCH"
 ```
+
+**Strategy C rationale (audit sub-agent-test #7 fix):** the v1.0 doc claimed Strategy C was for "single SKILL.md only" while the example also fetched SKILL-DEPLOY.md. The actual rationale is: Strategy C avoids leaving a `.git` dir around and avoids the git dependency — useful for skills that ship as a small set of Markdown files. For multi-file skills with scripts, prefer Strategy A (clone) so you get the full repo tree.
 
 ## Safety rules
 
@@ -342,9 +400,9 @@ rm -rf "$SCRATCH"
 
 4. **Mask PATs in any echoed output.** `git clone` with an embedded PAT can echo the URL in stderr (on failure, redirect messages, etc.). Pipe through `sed -E 's|(ghp_[A-Za-z0-9]+)|(***PAT***)|g'` if there's any chance of leakage.
 
-5. **Set executable modes.** Bash and Python scripts in `scripts/` need the executable bit. Set explicitly after install (don't trust the source repo's modes — repo.tar extraction doesn't preserve modes per z-container-kit F11).
+5. **Set executable modes explicitly.** (audit sub-agent-test #3, #4, #5, #6 fix) Use `chmod 0755` (NOT `chmod +x` — the latter produces 711 on umask 077, which is broken: group/other can execute but not read, so the shebang load fails). Apply to ALL scripts in `scripts/`, including extensionless ones (z-container-kit's `zsave`/`zsession` have no `.sh`/`.py` suffix). Also `chmod 0644` for `*.md` docs and `chmod 0755` for directories. The source repo's modes are NOT preserved across clone + tar/zip, and `cp -r` inherits umask (often 077), leaving files unreadable.
 
-6. **Verify after install.** Always `cat` the SKILL.md (or `wc -l` it), check `scripts/` is present and executable, and check no `.git` leaked. A silent install failure (e.g. `mv` across filesystems) leaves you with an empty target.
+6. **Verify after install.** (audit sub-agent-test #2, #3 fix) Always `wc -l` the SKILL.md (confirms readable + non-empty), **assert the executable bit is set on every script** (not just file existence — `ls` doesn't show modes), and check no `.git` leaked using `if [ -n "$LEAK" ]` (NOT `find | head -1 && echo WARN` — that always exits 0 because head succeeds on empty input, making the warning a false positive and the "no leakage" branch dead code).
 
 7. **Record provenance.** Write `.installed-from` so future chats know what version is installed. Critical for debugging "is this the patched version or the original?" without re-fetching.
 
