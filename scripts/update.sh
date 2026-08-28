@@ -115,14 +115,16 @@ gh_api() {
   fi
 }
 
-# ─── pre-update local-modification check ──────────────────────────────────────
-if [ -d "$TARGET" ] && [ -n "$OLD_COMMIT" ]; then
+# ─── pre-update local-modification check ────────────────────────────────────
+# GAP #4 fix (v1.5): removed the `&& [ -n "$OLD_COMMIT" ]` condition — we can
+# diff against the branch HEAD even without knowing the exact installed commit.
+# This catches local modifications on the FIRST update (when OLD_COMMIT is empty).
+if [ -d "$TARGET" ]; then
   echo "--- pre-update: local-modification check ---"
   # Re-clone the upstream version the install claims to be from, then diff
   SCRATCH_CHECK="/tmp/my-project/update-check-$$"
   mkdir -p "$SCRATCH_CHECK"
   # Use || true to prevent set -e from killing the script if clone fails
-  # (we handle the failure by checking [ -d "$SCRATCH_CHECK/upstream" ] below)
   if [ -n "${GH_PAT:-}" ]; then
     git clone -q --depth 1 -b "$SKILL_BRANCH" \
       "https://${GH_PAT}@github.com/${SKILL_REPO}.git" "$SCRATCH_CHECK/upstream" 2>/dev/null || true
@@ -131,7 +133,7 @@ if [ -d "$TARGET" ] && [ -n "$OLD_COMMIT" ]; then
       "https://github.com/${SKILL_REPO}.git" "$SCRATCH_CHECK/upstream" 2>/dev/null || true
   fi
   if [ -d "$SCRATCH_CHECK/upstream" ]; then
-    # Strip VCS from the upstream clone before diffing (the .git dir would show as a diff)
+    # Strip VCS from the upstream clone before diffing
     rm -rf "$SCRATCH_CHECK/upstream/.git" 2>/dev/null
     DIFF=$(diff -qr "$SCRATCH_CHECK/upstream" "$TARGET" 2>/dev/null \
       | grep -v -E '\.installed-from|\.pre-update-backup|\.pre-rollback|\.pre-export-refresh|\.pre-round|\.git/' \
@@ -141,13 +143,19 @@ if [ -d "$TARGET" ] && [ -n "$OLD_COMMIT" ]; then
       printf '%s\n' "$DIFF" | sed 's/^/    /'
       echo "  to preserve: cancel this update, cp the modified files aside, then re-run."
       if [ "${DRY_RUN:-0}" != "1" ]; then
-        # Use </dev/tty to read from terminal even when stdin is redirected
-        # (non-interactive runs get EOF → ans="" → abort branch)
-        read -r -p "  proceed with update (local mods will be backed up but overwritten)? [y/N] " ans </dev/tty || ans=""
-        case "$ans" in
-          y|Y) echo "  proceeding..." ;;
-          *)   echo "  aborted."; rm -rf "$SCRATCH_CHECK"; exit 0 ;;
-        esac
+        # GAP #3 fix (v1.5): support UPDATE_FORCE=1 for non-interactive/agent contexts
+        # where /dev/tty is unavailable. Without this, agents can't proceed past
+        # the prompt (read </dev/tty fails, ans="", abort branch).
+        if [ "${UPDATE_FORCE:-0}" = "1" ]; then
+          echo "  [UPDATE_FORCE=1] proceeding without prompt (local mods backed up)"
+        else
+          # Use </dev/tty to read from terminal even when stdin is redirected
+          read -r -p "  proceed with update (local mods will be backed up but overwritten)? [y/N] " ans </dev/tty || ans=""
+          case "$ans" in
+            y|Y) echo "  proceeding..." ;;
+            *)   echo "  aborted."; rm -rf "$SCRATCH_CHECK"; exit 0 ;;
+          esac
+        fi
       fi
     else
       echo "  no local modifications — safe to update."
@@ -221,8 +229,10 @@ echo "--- Step 4: atomic replace + set modes ---"
 rm -rf "$TARGET"
 mv "$SCRATCH/$SKILL_NAME" "$TARGET"
 [ -d "$TARGET/scripts" ] && find "$TARGET/scripts" -type f -exec chmod 0755 {} +
+# BUG #2 fix (v1.5): use -perm /111 instead of ! -executable (FUSE filesystems report
+# access(X_OK)=TRUE for all files, making ! -executable never match).
 find "$TARGET" -maxdepth 2 -type f ! -path "$TARGET/scripts/*" ! -name '.installed-from' \
-  ! -executable -exec chmod 0644 {} + 2>/dev/null
+  ! -perm /111 -exec chmod 0644 {} + 2>/dev/null
 chmod 0755 "$TARGET" 2>/dev/null
 [ -d "$TARGET/scripts" ] && chmod 0755 "$TARGET/scripts"
 [ -d "$TARGET/evidence" ] && chmod 0755 "$TARGET/evidence"
@@ -302,7 +312,12 @@ if [ -n "$OLD_COMMIT" ] && [ -n "$NEW_COMMIT" ] && [ "$OLD_COMMIT" != "$NEW_COMM
     echo "    (couldn't fetch commit range — possibly a force-push or different fork)"
   fi
 elif [ -n "$OLD_COMMIT" ] && [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then
-  echo "--- no change (already at $NEW_COMMIT) ---"
+  echo "--- no change (already at ${NEW_COMMIT:0:8}) ---"
+elif [ -z "$OLD_COMMIT" ] && [ -n "$NEW_COMMIT" ]; then
+  # GAP #5 fix (v1.5): on the first update (no OLD_COMMIT recorded), still report
+  # what we just installed so the user gets feedback.
+  echo "--- first update (commit now recorded as ${NEW_COMMIT:0:8}) ---"
+  echo "  previous install had no commit recorded; future updates will show drift."
 fi
 
 rm -rf "$SCRATCH"

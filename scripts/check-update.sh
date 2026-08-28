@@ -132,7 +132,11 @@ check_one() {
   # No commit pin — assume installed from main, can't tell which commit; just report upstream HEAD
   # (this is the conservative case: we don't know the installed SHA without re-cloning)
   local backups
-  backups=$(ls -dt "${target}.pre-update-backup-"* 2>/dev/null | wc -l)
+  # BUG #1 fix (v1.5): wrap ls in { ... || true; } to prevent set -e from
+  # killing the script when there are 0 backup dirs (ls exits 2 on no match,
+  # and pipefail propagates). Without this, check-update.sh silently exits 2
+  # on the most common case: a freshly installed skill with no backups yet.
+  backups=$( { ls -dt "${target}.pre-update-backup-"* 2>/dev/null || true; } | wc -l)
   echo "  $skill:"
   echo "    installed from: $repo@$branch (commit not recorded in provenance)"
   echo "    upstream HEAD:  ${upstream_sha:0:8} $upstream_msg"

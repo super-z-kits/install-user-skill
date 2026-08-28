@@ -321,8 +321,13 @@ fi
 # audit sub-agent-test v1.3 polish #1: also chmod 0644 for ALL non-executable files at top-2 levels
 # (was *.md-only; non-markdown docs like evidence/*.log stayed at 600). Excludes scripts/
 # (executable) and the .installed-from file (0600, set in Step 7).
+# BUG #2 fix (v1.5): use -perm /111 (pure mode-bit check) instead of ! -executable.
+# The -executable predicate uses access(X_OK) which on FUSE filesystems (like PolarFS
+# at /home/user_skills) returns TRUE for ALL files regardless of mode bits — so
+# ! -executable never matches, and docs stay at 600. -perm /111 checks the actual
+# mode bits (any of user/group/other execute bit set).
 find "$TARGET" -maxdepth 2 -type f ! -path "$TARGET/scripts/*" ! -name '.installed-from' \
-  ! -executable -exec chmod 0644 {} + 2>/dev/null
+  ! -perm /111 -exec chmod 0644 {} + 2>/dev/null
 chmod 0755 "$TARGET" 2>/dev/null
 [ -d "$TARGET/scripts" ] && chmod 0755 "$TARGET/scripts"
 [ -d "$TARGET/evidence" ] && chmod 0755 "$TARGET/evidence"
@@ -434,7 +439,7 @@ mv "$SCRATCH/$SKILL_NAME" "$TARGET"
 [ -d "$TARGET/scripts" ] && find "$TARGET/scripts" -type f -exec chmod 0755 {} +
 # v1.3 polish #1: chmod 0644 for all non-executable non-script files (catches *.md AND evidence/*.log)
 find "$TARGET" -maxdepth 2 -type f ! -path "$TARGET/scripts/*" ! -name '.installed-from' \
-  ! -executable -exec chmod 0644 {} + 2>/dev/null
+  ! -perm /111 -exec chmod 0644 {} + 2>/dev/null
 chmod 0755 "$TARGET" 2>/dev/null
 [ -d "$TARGET/scripts" ] && chmod 0755 "$TARGET/scripts"
 

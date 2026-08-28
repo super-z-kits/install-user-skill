@@ -46,15 +46,19 @@ mkdir -p "$SCRATCH"
 git clone -q --depth 1 -b "$SKILL_BRANCH" "https://github.com/${SKILL_REPO}.git" "$SCRATCH/$SKILL_NAME"
 
 # Step 3: strip VCS
-cd "$SCRATCH/$SKILL_NAME"
-rm -rf .git .gitignore .gitattributes 2>/dev/null
-find . -name .git -exec rm -rf {} + 2>/dev/null
+# Use absolute paths (NOT cd) — the mv in Step 4 will move this dir out from
+# under us if we cd'd into it (BUG found in update.sh development).
+rm -rf "$SCRATCH/$SKILL_NAME/.git" "$SCRATCH/$SKILL_NAME/.gitignore" "$SCRATCH/$SKILL_NAME/.gitattributes" 2>/dev/null
+find "$SCRATCH/$SKILL_NAME" -mindepth 2 -name .git -type d -exec rm -rf {} + 2>/dev/null || true
 
 # Step 4: atomic replace + set modes
+# v1.5 fix (BUG #2): use -perm /111 instead of ! -executable (FUSE filesystems report
+# access(X_OK)=TRUE for all files, so ! -executable never matches on /home/user_skills).
 rm -rf "$TARGET"
 mv "$SCRATCH/$SKILL_NAME" "$TARGET"
 [ -d "$TARGET/scripts" ] && find "$TARGET/scripts" -type f -exec chmod 0755 {} +
-find "$TARGET" -maxdepth 2 -type f -name '*.md' -exec chmod 0644 {} +
+find "$TARGET" -maxdepth 2 -type f ! -path "$TARGET/scripts/*" ! -name '.installed-from' \
+  ! -perm /111 -exec chmod 0644 {} + 2>/dev/null
 chmod 0755 "$TARGET" 2>/dev/null
 [ -d "$TARGET/scripts" ] && chmod 0755 "$TARGET/scripts"
 [ -d "$TARGET/evidence" ] && chmod 0755 "$TARGET/evidence"
