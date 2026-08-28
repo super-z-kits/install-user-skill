@@ -19,13 +19,13 @@ This file documents the install/update process so it's done consistently every t
 This skill is itself installable via its own procedure. To bootstrap it (i.e. install it for the first time when it's not already in `/home/user_skills/`):
 
 ```bash
-# Single-file install (Strategy C below) — no git needed
-mkdir -p /home/user_skills/install-user-skill
-curl -sS -o /home/user_skills/install-user-skill/install-user-skill.md \
+USER_SKILLS_DIR="${USER_SKILLS_DIR:-/home/user_skills}"
+mkdir -p "$USER_SKILLS_DIR/install-user-skill"
+curl -sS -o "$USER_SKILLS_DIR/install-user-skill/install-user-skill.md" \
   https://raw.githubusercontent.com/super-z-kits/install-user-skill/main/install-user-skill.md
-chmod 0644 /home/user_skills/install-user-skill/install-user-skill.md
+chmod 0644 "$USER_SKILLS_DIR/install-user-skill/install-user-skill.md"
 # Provenance
-cat > /home/user_skills/install-user-skill/.installed-from <<EOF
+cat > "$USER_SKILLS_DIR/install-user-skill/.installed-from" <<EOF
 repo: super-z-kits/install-user-skill
 branch: main
 installed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -84,8 +84,11 @@ fi
 SKILL_NAME="<skill-name>"                    # e.g. z-container-kit
 SKILL_REPO="<owner>/<repo>"                   # e.g. super-z-kits/z-container-kit  OR  zikomolapoutl/z-container-kit-v2 (work repo)
 SKILL_BRANCH="${SKILL_BRANCH:-main}"          # default to main; override for testing
-TARGET="/home/user_skills/$SKILL_NAME"
+USER_SKILLS_DIR="${USER_SKILLS_DIR:-/home/user_skills}"   # override for testing (e.g. /tmp/my-project/test-user-skills)
+TARGET="$USER_SKILLS_DIR/$SKILL_NAME"
 ```
+
+**`USER_SKILLS_DIR` env var (testability):** all paths in this procedure honor `$USER_SKILLS_DIR` (default `/home/user_skills`). Set it to a scratch dir to test the install procedure end-to-end without touching the live install. Hard-coding `/home/user_skills/` was an audit-F-round-5 finding (hard-coding caused the F16 "wrong repo pull" issue); the env var removes that footgun.
 
 ### Step 1 — backup the existing install (if present)
 
@@ -179,9 +182,9 @@ if [ -d "$TARGET/scripts" ]; then
   cp -r "$TARGET" "$STAGE/$(basename "$TARGET" | sed 's/-kit$//')"   # zip root: drop -kit suffix
   cd "$STAGE"
   zip -qr "${SKILL_NAME}.zip" "$(basename "$TARGET" | sed 's/-kit$//')"
-  mv "${SKILL_NAME}.zip" "/home/user_skills/${SKILL_NAME}.zip"
+  mv "${SKILL_NAME}.zip" "$USER_SKILLS_DIR/${SKILL_NAME}.zip"
   cd / && rm -rf "$STAGE"
-  echo "[ok] refreshed portable zip: /home/user_skills/${SKILL_NAME}.zip"
+  echo "[ok] refreshed portable zip: $USER_SKILLS_DIR/${SKILL_NAME}.zip"
 fi
 ```
 
@@ -227,11 +230,12 @@ This file is useful for: (a) knowing which fork/branch is installed when debuggi
 
 ```bash
 # Pre-flight
+USER_SKILLS_DIR="${USER_SKILLS_DIR:-/home/user_skills}"
 [ -f /home/user_skills/zk-doppler.env ] && { set -a; source /home/user_skills/zk-doppler.env; set +a; }
 SKILL_NAME="z-container-kit"
 SKILL_REPO="super-z-kits/z-container-kit"     # public export
 SKILL_BRANCH="main"
-TARGET="/home/user_skills/$SKILL_NAME"
+TARGET="$USER_SKILLS_DIR/$SKILL_NAME"
 
 # Backup
 [ -d "$TARGET" ] && cp -r "$TARGET" "${TARGET}.pre-update-backup-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -268,6 +272,7 @@ rm -rf "$SCRATCH"
 ## End-to-end example: update z-container-kit from the work repo (private)
 
 ```bash
+USER_SKILLS_DIR="${USER_SKILLS_DIR:-/home/user_skills}"
 set -a; source /home/user_skills/zk-doppler.env; set +a
 GH_PAT=$(curl -sS -H "Authorization: Bearer $DOPPLER_PT" \
   "https://api.doppler.com/v3/configs/config/secrets?project=$DOPPLER_PROJECT&config=$DOPPLER_CONFIG" \
@@ -276,7 +281,7 @@ GH_PAT=$(curl -sS -H "Authorization: Bearer $DOPPLER_PT" \
 SKILL_NAME="z-container-kit"
 SKILL_REPO="zikomolapoutl/z-container-kit-v2"   # private work repo
 SKILL_BRANCH="audit/round-5-onboarding-polish"  # testing a branch
-TARGET="/home/user_skills/$SKILL_NAME"
+TARGET="$USER_SKILLS_DIR/$SKILL_NAME"
 
 # Backup
 [ -d "$TARGET" ] && cp -r "$TARGET" "${TARGET}.pre-update-backup-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -294,10 +299,11 @@ git clone -q --depth 1 -b "$SKILL_BRANCH" \
 ## End-to-end example: install secrets-vault-kit (single-file variant)
 
 ```bash
+USER_SKILLS_DIR="${USER_SKILLS_DIR:-/home/user_skills}"
 SKILL_NAME="secrets-vault-kit"
 SKILL_REPO="super-z-kits/secrets-vault-kit"
 SKILL_BRANCH="main"
-TARGET="/home/user_skills/$SKILL_NAME"
+TARGET="$USER_SKILLS_DIR/$SKILL_NAME"
 
 # Backup
 [ -d "$TARGET" ] && cp -r "$TARGET" "${TARGET}.pre-update-backup-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -349,8 +355,9 @@ rm -rf "$SCRATCH"
 After install, you can check whether the installed version matches the upstream HEAD:
 
 ```bash
+USER_SKILLS_DIR="${USER_SKILLS_DIR:-/home/user_skills}"
 # What we have installed:
-cat /home/user_skills/z-container-kit/.installed-from
+cat "$USER_SKILLS_DIR/z-container-kit/.installed-from"
 
 # What's the upstream HEAD:
 curl -sS "https://api.github.com/repos/super-z-kits/z-container-kit/commits/main" | jq -r '.sha[0:8] + " " + .commit.message'
