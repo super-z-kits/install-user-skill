@@ -177,7 +177,11 @@ mv "$SCRATCH/$SKILL_NAME" "$TARGET"
 if [ -d "$TARGET/scripts" ]; then
   find "$TARGET/scripts" -type f -exec chmod 0755 {} +
 fi
-find "$TARGET" -maxdepth 2 -type f -name '*.md' -exec chmod 0644 {} +
+# audit sub-agent-test v1.3 polish #1: also chmod 0644 for ALL non-executable files at top-2 levels
+# (was *.md-only; non-markdown docs like evidence/*.log stayed at 600). Excludes scripts/
+# (executable) and the .installed-from file (0600, set in Step 7).
+find "$TARGET" -maxdepth 2 -type f ! -path "$TARGET/scripts/*" ! -name '.installed-from' \
+  ! -executable -exec chmod 0644 {} + 2>/dev/null
 chmod 0755 "$TARGET" 2>/dev/null
 [ -d "$TARGET/scripts" ] && chmod 0755 "$TARGET/scripts"
 [ -d "$TARGET/evidence" ] && chmod 0755 "$TARGET/evidence"
@@ -280,20 +284,32 @@ git clone -q --depth 1 -b "$SKILL_BRANCH" "https://github.com/${SKILL_REPO}.git"
 
 # Strip VCS
 cd "$SCRATCH/$SKILL_NAME"
-rm -rf .git .gitignore
+rm -rf .git .gitignore .gitattributes 2>/dev/null
 find . -name .git -exec rm -rf {} + 2>/dev/null
 
 # Atomic replace + set modes (Step 4 fix: chmod 0755 for ALL scripts, not just *.sh/*.py)
 rm -rf "$TARGET"
 mv "$SCRATCH/$SKILL_NAME" "$TARGET"
 [ -d "$TARGET/scripts" ] && find "$TARGET/scripts" -type f -exec chmod 0755 {} +
-find "$TARGET" -maxdepth 2 -type f -name '*.md' -exec chmod 0644 {} +
+# v1.3 polish #1: chmod 0644 for all non-executable non-script files (catches *.md AND evidence/*.log)
+find "$TARGET" -maxdepth 2 -type f ! -path "$TARGET/scripts/*" ! -name '.installed-from' \
+  ! -executable -exec chmod 0644 {} + 2>/dev/null
 chmod 0755 "$TARGET" 2>/dev/null
 [ -d "$TARGET/scripts" ] && chmod 0755 "$TARGET/scripts"
 
 # Verify (Step 6 fix: assert executable bit, not just file existence)
-[ -f "$TARGET/SKILL.md" ] && echo "✅ $TARGET/SKILL.md installed ($(wc -l < "$TARGET/SKILL.md") lines)"
-for s in "$TARGET/scripts"/*; do [ -f "$s" ] && [ ! -x "$s" ] && echo "[FAIL] not executable: $s"; done
+[ -f "$TARGET/SKILL.md" ] || { echo "[FAIL] $TARGET/SKILL.md missing"; exit 1; }
+echo "✅ $TARGET/SKILL.md installed ($(wc -l < "$TARGET/SKILL.md") lines)"
+# v1.3 polish #3: actually exit on FAIL (was just printing)
+VERIFY_FAIL=0
+for s in "$TARGET/scripts"/*; do
+  [ -f "$s" ] || continue
+  if [ ! -x "$s" ]; then
+    echo "[FAIL] not executable: $s"
+    VERIFY_FAIL=1
+  fi
+done
+[ "$VERIFY_FAIL" = 0 ] || exit 1
 
 # Provenance (Step 7: include installed_by + chmod 600)
 cat > "$TARGET/.installed-from" <<EOF
